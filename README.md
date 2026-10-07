@@ -9,7 +9,7 @@
 ![Domains](https://img.shields.io/badge/Domains-food_%2B_books-1F3864?style=for-the-badge)
 ![Models](https://img.shields.io/badge/Models-4-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-5-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-41_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-40_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -110,7 +110,7 @@ crossrec gives each of these questions its own component. Each component has a u
 | Providers | None. All models run locally with NumPy |
 | Offline mode | Everything. The synthetic data replaces the download |
 | Safety | The split raises `LeakageError` if a held-out rating is in the train data |
-| Tests | **41** unit tests (`pytest`). 1 test skips in CI because scikit-learn is optional |
+| Tests | **40** unit tests pass and **1** skips in CI (the MLP map test, scikit-learn is optional). With the `mlp` extra: 41 passed |
 
 ```mermaid
 flowchart LR
@@ -534,7 +534,7 @@ crossrec uses no credentials. Keep local values in `.env`. Git ignores this file
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests | **41 passed** (local). CI without scikit-learn: 40 passed, 1 skipped | `pytest -q` |
+| Unit tests | **40 passed, 1 skipped** in CI (scikit-learn is not installed). With the `mlp` extra installed: **41 passed** | `pytest -q` |
 | Synthetic, food → books, 84 cold-start users | See the first table below | `crossrec evaluate --synthetic` |
 | Synthetic, books → food, 84 cold-start users | See the second table below | `crossrec evaluate --synthetic --source books --target food` |
 | Old sample-then-intersect, synthetic | 24 shared users kept out of 420 | `crossrec stats --synthetic` |
