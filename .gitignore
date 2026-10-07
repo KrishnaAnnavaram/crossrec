@@ -1,0 +1,31 @@
+# secrets and local settings
+.env
+.env.*
+!.env.example
+
+# data: only the data README is committed (root-anchored, so src/ is never hidden)
+/data/*
+!/data/README.md
+*.csv
+*.parquet
+*.db
+*.sqlite
+
+# models, reports and other run output
+/models/
+/artifacts/
+/reports/
+*.npz
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/

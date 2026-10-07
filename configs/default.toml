@@ -1,0 +1,14 @@
+# Default experiment. Use it with: crossrec evaluate --config configs/default.toml
+[crossrec]
+data_dir = "data"
+seed = 42
+factors = 8
+reg = 0.1
+iterations = 12
+source_weight = 1.0
+min_user_ratings = 3
+min_item_ratings = 3
+max_users = 0
+test_fraction = 0.2
+k = 10
+relevant_threshold = 4.0

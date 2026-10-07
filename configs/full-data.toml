@@ -1,0 +1,13 @@
+# A starting point for the full public files. The values are not tuned.
+[crossrec]
+data_dir = "data"
+seed = 42
+factors = 32
+reg = 0.1
+iterations = 15
+min_user_ratings = 2
+min_item_ratings = 5
+max_users = 0
+test_fraction = 0.2
+k = 10
+relevant_threshold = 4.0
