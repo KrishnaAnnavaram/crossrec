@@ -69,6 +69,7 @@ This README is the **one location that explains all of crossrec**. It gives thes
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one recommendation](#42-the-life-cycle-of-one-recommendation)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 📥 [The data loaders](#5-the-data-loaders)
 6. 🔵 [The overlap and the k-core filter](#6-the-overlap-and-the-k-core-filter)
 7. ✂️ [The cold-start split](#7-the-cold-start-split)
@@ -141,6 +142,54 @@ flowchart LR
 | Evaluation | `src/crossrec/evaluate.py` | The cold-start protocol and the result table |
 | CLI | `src/crossrec/cli.py` | The `crossrec` command with 5 subcommands |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>synth, stats, evaluate, train, recommend"]
+    CFG["config.py<br/>Settings"]
+    subgraph DATA["Data"]
+        SYN["synthetic.py<br/>generate, write_raw_csv"]
+        LD["data.py<br/>load_reviews, CrossDomainData"]
+        SCH["schema.py<br/>validate_ratings, merge_duplicates"]
+        OV["overlap.py<br/>prepare, kcore"]
+        SP["split.py<br/>cold_start_split, full_train"]
+    end
+    subgraph MODELS["models/"]
+        REG["__init__.py<br/>build, load"]
+        BASE["base.py<br/>Recommender"]
+        BL["baselines.py<br/>popularity, itembias"]
+        CMF["cmf.py<br/>CMFRecommender"]
+        EM["emcdr.py<br/>EMCDRRecommender"]
+        ALS["als.py<br/>fit_biases, als, fold_in, BiasedMF"]
+    end
+    EV["evaluate.py<br/>evaluate_model"]
+    MET["metrics.py<br/>recall, NDCG, MAP, bootstrap_ci"]
+
+    CLI --> CFG
+    CLI --> SYN
+    CLI --> LD
+    CLI --> OV
+    CLI --> SP
+    CLI --> REG
+    CLI --> EV
+    SYN --> SCH
+    LD --> SCH
+    OV --> LD
+    REG --> BL
+    REG --> CMF
+    REG --> EM
+    BL --> BASE
+    CMF --> BASE
+    EM --> BASE
+    BASE --> ALS
+    CMF --> ALS
+    EM --> ALS
+    EV --> SP
+    EV --> MET
+    EV --> BASE
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -181,6 +230,22 @@ crossrec/
 ### 3.1 One latent space for each prediction
 Two independent factorisations have unrelated axes. Factor 3 of the food model has no relation to factor 3 of the book model. Thus the code never multiplies a food user vector with a book item vector from a different fit. CMF solves the books and the food against the same user vectors. EMCDR learns an explicit map from one space to the other.
 
+```mermaid
+flowchart LR
+    subgraph CMFP["CMF: one fit"]
+        SR[/"Source ratings"/] --> UV["One user vector<br/>for both domains"]
+        TR[/"Target ratings"/] --> UV
+        UV --> S1["user vector x target item vector"]
+    end
+    subgraph EMP["EMCDR: two fits and a map"]
+        SMF["Source BiasedMF<br/>user vector"] --> MAP["Ridge map,<br/>learned on bridge users"]
+        MAP --> TV["Vector in the target space"]
+        TV --> S2["mapped vector x target item vector"]
+    end
+    S1 --> OUT[/"Target item scores"/]
+    S2 --> OUT
+```
+
 ### 3.2 Only observed ratings enter the fit
 A missing rating is not a 0-star rating. `models/als.py` fits biases and factors only on the (user, item, rating) triples that exist. The fit never makes a dense matrix that has zeros in it.
 
@@ -206,12 +271,13 @@ The split, the subsample, the ALS start values and the bootstrap use one seed. M
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    F["Reviews.csv"] --> LF["Load food (chunks, 4 columns)"]
-    B["Books_rating.csv"] --> LB["Load books (chunks, food users only)"]
-    SY["--synthetic"] --> V
+flowchart TD
+    F[/"Reviews.csv"/] --> LF["Load food (chunks, 4 columns)"]
+    B[/"Books_rating.csv"/] --> LB["Load books (chunks, food users only)"]
+    SY[/"--synthetic"/] --> GEN["synthetic.generate"]
     LF --> V["Validate: drop bad rows, merge duplicates"]
     LB --> V
+    GEN --> V
     V --> O["Shared users"]
     O --> K["Joint k-core filter"]
     K --> SS["Seeded subsample (optional) and k-core again"]
@@ -219,11 +285,41 @@ flowchart TB
     SS --> FT["Full train data"]
     SP --> FIT["Fit popularity, itembias, cmf, emcdr"]
     FIT --> EV["Evaluate: recall, NDCG, MAP, hit rate, RMSE, MAE, 95% interval"]
+    EV --> REP[/"Results table, reports/*.json"/]
+    REP --> HC{{"HUMAN<br/>compare each model with the baselines,<br/>choose --model for train"}}
+    HC --> TR
     FT --> TR["Fit one model and save the model folder"]
-    TR --> RE["Recommend top-k for one user ID"]
+    TR --> MD[("models/name/<br/>model.json, arrays.npz")]
+    MD --> RE["Recommend top-k for one user ID"]
+    UID[/"User ID"/] --> RE
+    RE --> OUT[/"Top-k target items with titles and scores"/]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HC human
 ```
 
 ### 4.2 The life cycle of one recommendation
+
+```mermaid
+stateDiagram-v2
+    state "Request: user ID and k" as Request
+    state "Model loaded" as Loaded
+    state "Source history found" as History
+    state "User vector ready" as Vector
+    state "Scores of all target items" as Scored
+    state "Rated items excluded" as Filtered
+    state "Top-k list printed" as Printed
+    [*] --> Request: crossrec recommend
+    Request --> Loaded: load(model_dir), allow_pickle False
+    Loaded --> NoUser: no source rating and not in the model
+    Loaded --> History: source ratings, or a user known to the model
+    History --> Vector: stored vector, or fold-in, or EMCDR map
+    Vector --> Scored: score_target
+    Scored --> Filtered: exclude target items that the user rated
+    Filtered --> Printed: top k with titles and scores
+    NoUser --> [*]: exit code 2
+    Printed --> [*]
+```
 
 1. The loaders read the two CSV files and validate each row.
 2. The overlap step keeps users with ratings in both domains.
@@ -235,11 +331,69 @@ flowchart TB
 8. The command removes the items that the user rated in the target domain.
 9. The command prints the top-k item IDs with their titles and scores.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor OP as Operator
+    participant CLI as crossrec CLI
+    participant LD as data.py
+    participant OV as overlap.py
+    participant SP as split.py
+    participant M as Recommender
+    participant EV as evaluate.py
+    participant FS as Model folder
+
+    OP->>CLI: crossrec evaluate --config configs/full-data.toml
+    CLI->>CLI: Settings.from_env, merge_toml, merge flags, validate
+    CLI->>LD: load_reviews(data_dir)
+    LD-->>CLI: CrossDomainData with ValidationReports
+    CLI->>OV: prepare(data, min_user, min_item, max_users, seed)
+    OV-->>CLI: filtered data, OverlapReport
+    CLI->>SP: cold_start_split(core, source, target, test_fraction, seed)
+    SP->>SP: check_no_leakage
+    SP-->>CLI: ColdStartSplit
+    loop each name in --models
+        CLI->>M: build(name, settings).fit(split.train)
+        CLI->>EV: evaluate_model(model, split, k, relevant_threshold)
+        EV->>M: predict and recommend with an unknown key and the source history
+        EV-->>CLI: ModelResult
+    end
+    CLI-->>OP: results table, optional JSON report
+    OP->>CLI: crossrec train --model emcdr --out models/emcdr
+    CLI->>M: build, fit(full_train(core))
+    M->>FS: save: model.json, arrays.npz
+    OP->>CLI: crossrec recommend --model-dir models/emcdr --user ID
+    CLI->>FS: load(model_dir), allow_pickle False
+    CLI->>M: recommend(user, k, source_history, exclude rated items)
+    M-->>CLI: top-k item IDs and scores
+    CLI-->>OP: ranked list with titles
+```
+
 ---
 
 ## 5. The data loaders
 
 **Purpose.** Read the two public files into one canonical rating schema.
+
+```mermaid
+flowchart TD
+    DIR[/"data_dir: Reviews.csv first,<br/>then Books_rating.csv"/] --> FF{"File exists?"}
+    FF -- "no" --> E1[/"FileNotFoundError"/]
+    FF -- "yes" --> HD{"Required columns<br/>in the header?"}
+    HD -- "no" --> E2[/"SchemaError"/]
+    HD -- "yes" --> CH["Read the used columns,<br/>200,000 rows for each chunk"]
+    CH --> RN["Rename to user_id, item_id,<br/>rating, timestamp"]
+    RN --> BK{"Books file?"}
+    BK -- "yes" --> FU["Keep rows of users who rated food,<br/>keep the Id to Title map"]
+    BK -- "no" --> VR
+    FU --> VR["validate_ratings: drop empty IDs,<br/>non-numeric or out-of-range ratings"]
+    VR --> MD["merge_duplicates in the chunk"]
+    MD --> CC["Concatenate the chunks"]
+    CC --> MD2["merge_duplicates over the full domain"]
+    MD2 --> OUT[/"CrossDomainData: ratings,<br/>titles, ValidationReport"/]
+```
 
 | Input | Output |
 |---|---|
@@ -272,6 +426,20 @@ flowchart TB
 
 **Purpose.** Keep enough shared users, and keep only users and items with enough ratings.
 
+```mermaid
+flowchart TD
+    IN[/"CrossDomainData"/] --> CNT["Count users of each domain<br/>and shared users"]
+    CNT --> U["Keep users with at least min_user_ratings<br/>in EACH domain"]
+    U --> I["In each domain, keep items with<br/>at least min_item_ratings"]
+    I --> CH{"Any row removed,<br/>and fewer than 100 rounds?"}
+    CH -- "yes" --> U
+    CH -- "no" --> MX{"max_users above 0?"}
+    MX -- "yes" --> SUB["subsample_users:<br/>seeded random subset"]
+    SUB --> U2["kcore again"]
+    MX -- "no" --> OUT[/"Filtered data and OverlapReport"/]
+    U2 --> OUT
+```
+
 | Input | Output |
 |---|---|
 | `CrossDomainData` | Filtered `CrossDomainData` and an `OverlapReport` |
@@ -295,6 +463,22 @@ flowchart TB
 
 **Purpose.** Make a test set in which each test user has no visible target rating.
 
+```mermaid
+flowchart TD
+    IN[/"Filtered data, source, target,<br/>test_fraction, seed"/] --> SD{"source = target?"}
+    SD -- "yes" --> E1[/"ValueError"/]
+    SD -- "no" --> SH["Shared users, sorted"]
+    SH --> N2{"At least 2 shared users?"}
+    N2 -- "no" --> E2[/"ValueError"/]
+    N2 -- "yes" --> PICK["Seeded choice of max 1 or<br/>round test_fraction x shared users"]
+    PICK --> TR["TrainData: all source ratings,<br/>target ratings of train users"]
+    PICK --> HO["Held-out set: target ratings<br/>of test users"]
+    TR --> CK{"check_no_leakage:<br/>test user in train target?"}
+    HO --> CK
+    CK -- "yes" --> LE[/"LeakageError"/]
+    CK -- "no" --> OUT[/"ColdStartSplit"/]
+```
+
 | Input | Output |
 |---|---|
 | Filtered data, source domain, target domain, `test_fraction`, seed | `ColdStartSplit`: `TrainData`, held-out target ratings, train users, test users |
@@ -302,7 +486,7 @@ flowchart TB
 **Procedure**
 
 1. List the shared users in sorted order.
-2. Select `round(test_fraction × shared users)` test users with the seed.
+2. Select `max(1, round(test_fraction × shared users))` test users with the seed.
 3. Put all source ratings in the train data. The test users keep their source history.
 4. Put the target ratings of the train users in the train data.
 5. Put the target ratings of the test users in the held-out set.
@@ -320,6 +504,17 @@ flowchart TB
 
 **Purpose.** Give the reference level that a cross-domain model must beat. Neither baseline reads the source domain.
 
+```mermaid
+flowchart LR
+    TT[/"Train target ratings"/] --> FB["Recommender.fit:<br/>fit_biases, global mean and item bias"]
+    TT --> PC["Count ratings at or above<br/>relevant_threshold for each item"]
+    PC --> PS["popularity score =<br/>positive count + 0.001 x all ratings"]
+    FB --> IB["itembias score =<br/>global mean + item bias"]
+    FB --> RP["Rating prediction of both:<br/>global mean + item bias"]
+    PS --> OUT[/"Same ranked list<br/>for every user"/]
+    IB --> OUT
+```
+
 | Model | Score of a target item | Rating prediction |
 |---|---|---|
 | `popularity` | The count of train target ratings at or above `relevant_threshold`, plus 0.001 × all ratings as a tie-break | Global mean + item bias |
@@ -332,6 +527,27 @@ A target-only matrix factorisation has no user vector for a cold-start user. Its
 ## 9. The CMF model
 
 **Purpose.** Learn one user vector that explains the ratings of both domains.
+
+```mermaid
+flowchart TD
+    IN[/"TrainData"/] --> UI["One user index for both domains"]
+    UI --> BS["fit_biases for each domain:<br/>5 rounds, regularisation 5"]
+    BS --> RES["Residual of each rating<br/>after the biases"]
+    RES --> II["One item index:<br/>source items first, then target items"]
+    II --> W["Weights: source_weight for source,<br/>1 for target"]
+    W --> ALS["als: for each iteration, solve all<br/>user vectors, then all item vectors"]
+    ALS --> VEC["user_f, source_item_f, target_item_f"]
+    Q[/"User ID and source history"/] --> KN{"User in the user index?"}
+    VEC --> KN
+    KN -- "yes" --> ST["Stored vector,<br/>stored target user bias"]
+    KN -- "no" --> HS{"Known source items<br/>in the history?"}
+    HS -- "yes" --> FI["fold_in from source ratings,<br/>target user bias 0"]
+    HS -- "no" --> ZV["Zero vector: itembias scores"]
+    ST --> SC["target mean + user bias + item bias<br/>+ user vector x item vector"]
+    FI --> SC
+    ZV --> SC
+    SC --> OUT[/"Scores of all target items"/]
+```
 
 | Input | Output |
 |---|---|
@@ -359,6 +575,31 @@ A target-only matrix factorisation has no user vector for a cold-start user. Its
 
 **Purpose.** Keep two separate factorisations, and learn a map between their user spaces.
 
+```mermaid
+flowchart TD
+    IN[/"TrainData"/] --> SMF["BiasedMF on all source ratings"]
+    IN --> TMF["BiasedMF on train target ratings"]
+    SMF --> BR["Bridge users: in both MFs"]
+    TMF --> BR
+    BR --> N2{"At least 2 bridge users?"}
+    N2 -- "no" --> E1[/"ValueError"/]
+    N2 -- "yes" --> MP{"mapping"}
+    MP -- "linear" --> RG["Ridge map, map_reg 1.0,<br/>intercept not penalised"]
+    MP -- "mlp" --> ML["MLPRegressor,<br/>2 x factors hidden units"]
+    Q[/"User ID and source history"/] --> TU{"User in the target MF?"}
+    TU -- "yes" --> TV["Stored target vector and bias"]
+    TU -- "no" --> SU{"User in the source MF?"}
+    SU -- "yes" --> SV["Stored source vector"]
+    SU -- "no" --> FI["Source MF fold_in<br/>from the history"]
+    SV --> MV["map_vector"]
+    FI --> MV
+    RG --> MV
+    ML --> MV
+    TV --> SC["target mean + bias + item bias<br/>+ vector x target item vector"]
+    MV --> SC
+    SC --> OUT[/"Scores of all target items"/]
+```
+
 | Input | Output |
 |---|---|
 | `TrainData` | A source `BiasedMF`, a target `BiasedMF`, a map |
@@ -385,6 +626,23 @@ A target-only matrix factorisation has no user vector for a cold-start user. Its
 
 **Purpose.** Measure how well each model ranks and rates the target items of cold-start users.
 
+```mermaid
+flowchart TD
+    IN[/"Fitted model, ColdStartSplit,<br/>k, relevant_threshold"/] --> LK["check_no_leakage"]
+    LK --> U["Next test user"]
+    U --> H["Source history from the train data"]
+    H --> PR["predict each held-out item<br/>with the key __cold_start__::user"]
+    PR --> YP["Collect for RMSE and MAE"]
+    H --> RL{"Any held-out rating at or<br/>above relevant_threshold?"}
+    RL -- "no" --> NR["users_without_relevant + 1"]
+    RL -- "yes" --> UR["Count relevant items that no<br/>train user rated: unreachable_relevant"]
+    UR --> RK["recommend top k with the unknown key"]
+    RK --> MT["recall, NDCG, MAP,<br/>precision, hit rate at k"]
+    MT --> AGG["Mean over users,<br/>bootstrap_ci with 1,000 samples"]
+    YP --> OUT
+    AGG --> OUT[/"ModelResult"/]
+```
+
 | Input | Output |
 |---|---|
 | A fitted model, a `ColdStartSplit`, `k`, `relevant_threshold`, seed | `ModelResult`: mean metrics, 95% bootstrap intervals, RMSE, MAE, counts |
@@ -410,6 +668,18 @@ A target-only matrix factorisation has no user vector for a cold-start user. Its
 ---
 
 ## 12. The settings and decision rules
+
+```mermaid
+flowchart LR
+    D["Settings defaults"] --> E["from_env:<br/>CROSSREC_* variables"]
+    E --> T{"--config given?"}
+    T -- "yes" --> TM["merge_toml:<br/>[crossrec] table"]
+    T -- "no" --> FL
+    TM --> FL["merge: CLI flags that are set"]
+    FL --> V{"validate"}
+    V -- "rule fails" --> ERR[/"ValueError, exit code 2"/]
+    V -- "pass" --> OK[/"Settings for the run"/]
+```
 
 | Setting | Default | Rule |
 |---|---|---|
@@ -477,6 +747,17 @@ pip install -e ".[dev]"         # add ,mlp for the MLP map
 
 Offline (no download):
 
+```mermaid
+flowchart LR
+    EV["crossrec evaluate --synthetic<br/>generate, no files"] --> TAB[/"Results table"/]
+    SY["crossrec synth"] --> CSV[("data/synthetic/<br/>Reviews.csv, Books_rating.csv")]
+    CSV --> ST["crossrec stats"]
+    CSV --> TR["crossrec train --model cmf"]
+    TR --> MF[("models/cmf/<br/>model.json, arrays.npz")]
+    MF --> RE["crossrec recommend --user U00003"]
+    CSV --> RE
+```
+
 ```bash
 crossrec evaluate --synthetic                                   # food -> books, all 4 models
 crossrec evaluate --synthetic --source books --target food
@@ -513,7 +794,7 @@ crossrec recommend --data-dir data --model-dir models/emcdr --user A3SGXH7AUHU8G
 | `CROSSREC_RELEVANT_THRESHOLD` | Evaluation, popularity | Default 4.0 |
 
 The order of precedence is: CLI flag, TOML file (`--config`), environment variable, default.
-crossrec uses no credentials. Keep local values in `.env`. Git ignores this file.
+crossrec uses no credentials. crossrec does not load `.env` itself. Set the `CROSSREC_*` variables in the shell. Git ignores `.env`.
 
 ---
 
